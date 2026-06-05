@@ -15,6 +15,7 @@ class Key_Fea_Align(nn.Module):
         self.s_sizes = s_sizes
         self.t_sizes = t_sizes
         self.mapping = self._layer_mapping(student_layers, teacher_layers)
+        self.evo_key_ratio = getattr(args, "evo_key_ratio", 0.2)
 
         self.C_attn_list = nn.ModuleList([
             nn.Sequential(
@@ -65,12 +66,88 @@ class Key_Fea_Align(nn.Module):
             mapping.append((i, j))
         return mapping
 
+    @staticmethod
+    def _resize_pos_to(pos, size_hw):
+        pos_chw = pos.permute(0, 3, 1, 2)
+        resized = F.interpolate(pos_chw, size=size_hw, mode="bilinear", align_corners=False)
+        return resized.permute(0, 2, 3, 1)
+
+    @staticmethod
+    def _resize_score_to(score, size_hw):
+        return F.interpolate(score.unsqueeze(1), size=size_hw, mode="bilinear", align_corners=False).squeeze(1)
+
+    @staticmethod
+    def _feature_score(feat):
+        return feat.detach().abs().mean(dim=1)
+
+    @staticmethod
+    def _topk_count(total, ratio):
+        if ratio is None or ratio <= 0:
+            return total
+        if 0 < ratio < 1:
+            return max(1, int(total * ratio + 0.999999))
+        return min(total, int(ratio))
+
+    def _key_trajectory_loss(self, student_pos, teacher_pos, teacher_scores):
+        if len(student_pos) <= 1:
+            return student_pos[0].new_tensor(0.0) if student_pos else torch.tensor(0.0, device=self.device)
+
+        evo_loss = student_pos[0].new_tensor(0.0)
+        eps = 1e-8
+        valid_pairs = 0
+
+        for l in range(len(student_pos) - 1):
+            p1_s, p1_t = student_pos[l], teacher_pos[l]
+            p2_s, p2_t = student_pos[l + 1], teacher_pos[l + 1]
+            H_l, W_l = p1_s.shape[1:3]
+
+            p2_s_resized = self._resize_pos_to(p2_s, (H_l, W_l))
+            p2_t_resized = self._resize_pos_to(p2_t, (H_l, W_l))
+
+            phi_s = p1_s - p2_s_resized
+            phi_t = p1_t - p2_t_resized
+
+            score_l = teacher_scores[l]
+            score_next = self._resize_score_to(teacher_scores[l + 1], (H_l, W_l))
+            key_score = 0.5 * (score_l + score_next)
+
+            # DAttention positions are [B * groups, H, W, 2], while feature scores are [B, H, W].
+            if phi_t.shape[0] % key_score.shape[0] != 0:
+                continue
+            n_groups = max(1, phi_t.shape[0] // key_score.shape[0])
+            key_score = key_score[:, None, :, :].expand(-1, n_groups, -1, -1).reshape(phi_t.shape[0], H_l, W_l)
+
+            phi_s_flat = phi_s.reshape(phi_s.shape[0], -1, 2)
+            phi_t_flat = phi_t.reshape(phi_t.shape[0], -1, 2)
+            score_flat = key_score.reshape(key_score.shape[0], -1)
+
+            k = self._topk_count(score_flat.shape[1], self.evo_key_ratio)
+            if k <= 0:
+                continue
+
+            key_idx = torch.topk(score_flat, k=k, dim=1, largest=True).indices
+            gather_idx = key_idx.unsqueeze(-1).expand(-1, -1, 2)
+            phi_s_key = torch.gather(phi_s_flat, dim=1, index=gather_idx)
+            phi_t_key = torch.gather(phi_t_flat, dim=1, index=gather_idx)
+
+            phi_s_norm = phi_s_key / (phi_s_key.norm(dim=-1, keepdim=True) + eps)
+            phi_t_norm = phi_t_key.detach() / (phi_t_key.detach().norm(dim=-1, keepdim=True) + eps)
+            cos_sim = (phi_s_norm * phi_t_norm).sum(dim=-1)
+
+            evo_loss += (1.0 - cos_sim).mean()
+            valid_pairs += 1
+
+        if valid_pairs == 0:
+            return student_pos[0].new_tensor(0.0)
+        return evo_loss / valid_pairs
+
     def forward(self, student_feats: list, teacher_feats: list):
         aligned_loss = 0.0
         evo_loss = 0.0
 
         student_pos = []
         teacher_pos = []
+        teacher_scores = []
 
         for idx, (i_s, j_t) in enumerate(self.mapping):
             s_feat = student_feats[i_s]
@@ -117,35 +194,10 @@ class Key_Fea_Align(nn.Module):
             if t_pos is not None or s_pos is not None:
                 teacher_pos.append(t_pos)
                 student_pos.append(s_pos)
+                teacher_scores.append(self._feature_score(h_t_prime))
 
         if len(student_pos) > 1:
-            evo_loss = 0.0
-            eps = 1e-8
-
-            for l in range(len(student_pos) - 1):
-                p1_s, p1_t = student_pos[l], teacher_pos[l]
-                p2_s, p2_t = student_pos[l + 1], teacher_pos[l + 1]
-                H_l, W_l = p1_s.shape[1:3]
-
-                p2_s_resized = F.interpolate(p2_s.permute(0, 3, 1, 2), size=(H_l, W_l),
-                                     mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-                p2_t_resized = F.interpolate(p2_t.permute(0, 3, 1, 2), size=(H_l, W_l),
-                                     mode='bilinear', align_corners=False).permute(0, 2, 3, 1)
-
-                phi_s = p1_s - p2_s_resized
-                phi_t = p1_t - p2_t_resized
-
-                phi_s_flat = phi_s.reshape(phi_s.shape[0], -1, 2)
-                phi_t_flat = phi_t.reshape(phi_t.shape[0], -1, 2)
-
-                phi_s_norm = phi_s_flat / (phi_s_flat.norm(dim=-1, keepdim=True) + eps)
-                phi_t_norm = phi_t_flat / (phi_t_flat.norm(dim=-1, keepdim=True) + eps)
-
-                cos_sim = (phi_s_norm * phi_t_norm).sum(dim=-1)
-
-                evo_loss += (1.0 - cos_sim).mean()
-
-            evo_loss /= (len(student_pos) - 1)
+            evo_loss = self._key_trajectory_loss(student_pos, teacher_pos, teacher_scores)
 
         return aligned_loss, evo_loss
 
