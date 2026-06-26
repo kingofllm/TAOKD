@@ -15,7 +15,8 @@ class Key_Fea_Align(nn.Module):
         self.s_sizes = s_sizes
         self.t_sizes = t_sizes
         self.mapping = self._layer_mapping(student_layers, teacher_layers)
-        self.evo_key_ratio = getattr(args, "evo_key_ratio", 0.2)
+        self.aligned_key_ratio = getattr(args, "aligned_key_ratio", 0.3)
+        self.evo_key_ratio = getattr(args, "aligned_key_ratio", self.aligned_key_ratio)
 
         self.C_attn_list = nn.ModuleList([
             nn.Sequential(
@@ -79,6 +80,31 @@ class Key_Fea_Align(nn.Module):
     @staticmethod
     def _feature_score(feat):
         return feat.detach().abs().mean(dim=1)
+
+    def _key_feature_align_loss(self, student_feat, teacher_feat, teacher_score=None):
+        if student_feat.dim() < 4 or teacher_feat.dim() < 4:
+            return F.mse_loss(student_feat, teacher_feat)
+
+        B, C, H, W = teacher_feat.shape
+        total = H * W
+        k = self._topk_count(total, self.aligned_key_ratio)
+        if k >= total:
+            return F.mse_loss(student_feat, teacher_feat)
+
+        if teacher_score is None:
+            teacher_score = self._feature_score(teacher_feat)
+        if teacher_score.shape[-2:] != (H, W):
+            teacher_score = self._resize_score_to(teacher_score, (H, W))
+
+        score_flat = teacher_score.reshape(B, -1)
+        key_idx = torch.topk(score_flat, k=k, dim=1, largest=True).indices
+        gather_idx = key_idx.unsqueeze(-1).expand(-1, -1, C)
+
+        student_flat = student_feat.reshape(B, C, total).transpose(1, 2)
+        teacher_flat = teacher_feat.reshape(B, C, total).transpose(1, 2)
+        student_key = torch.gather(student_flat, dim=1, index=gather_idx)
+        teacher_key = torch.gather(teacher_flat, dim=1, index=gather_idx)
+        return F.mse_loss(student_key, teacher_key)
 
     @staticmethod
     def _topk_count(total, ratio):
@@ -189,12 +215,13 @@ class Key_Fea_Align(nn.Module):
                 h_t_prime, t_pos = self.deform_attn_teacher[idx](t_feat)
                 h_s_prime, s_pos = self.deform_attn_student[idx](s_proj)
 
-            aligned_loss += F.mse_loss(h_s_prime, h_t_prime)
+            teacher_score = self._feature_score(h_t_prime) if h_t_prime.dim() >= 4 else None
+            aligned_loss += self._key_feature_align_loss(h_s_prime, h_t_prime, teacher_score)
 
             if t_pos is not None or s_pos is not None:
                 teacher_pos.append(t_pos)
                 student_pos.append(s_pos)
-                teacher_scores.append(self._feature_score(h_t_prime))
+                teacher_scores.append(teacher_score)
 
         if len(student_pos) > 1:
             evo_loss = self._key_trajectory_loss(student_pos, teacher_pos, teacher_scores)
