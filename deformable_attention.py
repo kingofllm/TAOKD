@@ -111,8 +111,17 @@ class DAttention(nn.Module):
             indexing='ij'
         )
         ref = torch.stack((ref_y, ref_x), -1)
-        ref[..., 1].div_(W_key - 1.0).mul_(2.0).sub_(1.0)
-        ref[..., 0].div_(H_key - 1.0).mul_(2.0).sub_(1.0)
+        # A large stride can reduce a feature map to 1x1.  In that case
+        # there is no spatial interval to normalize, so place the singleton
+        # coordinate at the grid center (0 in grid_sample coordinates).
+        if W_key > 1:
+            ref[..., 1].div_(W_key - 1.0).mul_(2.0).sub_(1.0)
+        else:
+            ref[..., 1].zero_()
+        if H_key > 1:
+            ref[..., 0].div_(H_key - 1.0).mul_(2.0).sub_(1.0)
+        else:
+            ref[..., 0].zero_()
         ref = ref[None, ...].expand(B * self.n_groups, -1, -1, -1)  # B * g H W 2
         return ref
 
@@ -125,8 +134,14 @@ class DAttention(nn.Module):
             indexing='ij'
         )
         ref = torch.stack((ref_y, ref_x), -1)
-        ref[..., 1].div_(W - 1.0).mul_(2.0).sub_(1.0)
-        ref[..., 0].div_(H - 1.0).mul_(2.0).sub_(1.0)
+        if W > 1:
+            ref[..., 1].div_(W - 1.0).mul_(2.0).sub_(1.0)
+        else:
+            ref[..., 1].zero_()
+        if H > 1:
+            ref[..., 0].div_(H - 1.0).mul_(2.0).sub_(1.0)
+        else:
+            ref[..., 0].zero_()
         ref = ref[None, ...].expand(B * self.n_groups, -1, -1, -1)  # B * g H W 2
 
         return ref
@@ -143,7 +158,10 @@ class DAttention(nn.Module):
         n_sample = Hk * Wk
 
         if self.offset_range_factor >= 0 and not self.no_off:
-            offset_range = torch.tensor([1.0 / (Hk - 1.0), 1.0 / (Wk - 1.0)], device=device).reshape(1, 2, 1, 1)
+            offset_range = torch.tensor([
+                1.0 / max(Hk - 1, 1),
+                1.0 / max(Wk - 1, 1)
+            ], device=device, dtype=offset.dtype).reshape(1, 2, 1, 1)
             offset = offset.tanh().mul(offset_range).mul(self.offset_range_factor)
 
         offset = einops.rearrange(offset, 'b p h w -> b h w p')
