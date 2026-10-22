@@ -69,6 +69,7 @@ class TrainingArguments(transformers.TrainingArguments):
     stride: int = field(default=None)
     alpha: float = field(default=None)
     beta: float = field(default=None)
+    aligned_key_ratio: float = field(default=0.3)
     use_aligned_loss: bool = field(default=True)
     use_evo_loss: bool = field(default=True)
     output_dir: str = field(default=None)
