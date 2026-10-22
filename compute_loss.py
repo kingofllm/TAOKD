@@ -134,6 +134,12 @@ class Key_Fea_Align(nn.Module):
             phi_t = p1_t - p2_t_resized
 
             score_l = teacher_scores[l]
+            # With stride > 1, DAttention positions are on the downsampled
+            # H_l x W_l grid while feature scores may still be at the
+            # original feature-map resolution.  Align both scores to the
+            # position grid before combining them.
+            if score_l.shape[-2:] != (H_l, W_l):
+                score_l = self._resize_score_to(score_l, (H_l, W_l))
             score_next = self._resize_score_to(teacher_scores[l + 1], (H_l, W_l))
             key_score = 0.5 * (score_l + score_next)
 
