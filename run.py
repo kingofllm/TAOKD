@@ -13,6 +13,7 @@ param_grid = {
     "weight_decay": [5e-4],
     "alpha": [0.1],
     "beta": [0.1],
+    "aligned_key_ratio": [0.3],
     "epochs": [300],
     "distill": [1],
     "gamma": [0.1],
@@ -60,6 +61,7 @@ def run_experiment(idx, params):
         "--stride", str(params_dict["stride"]),
         "--alpha", str(params_dict["alpha"]),
         "--beta", str(params_dict["beta"]),
+        "--aligned_key_ratio", str(params_dict["aligned_key_ratio"]),
         "--use_aligned_loss", str(params_dict["use_aligned_loss"]),
         "--use_evo_loss", str(params_dict["use_evo_loss"]),
         "--output_dir", output_dir
