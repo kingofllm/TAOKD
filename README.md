@@ -110,7 +110,7 @@ Modify the `param_grid` dictionary in `run.py` to define your search space.
 The total loss function for the student model consists of the following components:
 
 ```
-L_total = (1 - lambda) * L_ce + lambda * L_kd + alpha * L_aligned + beta * L_evo
+L_total = L_ce + L_kd + alpha * L_aligned + beta * L_evo
 ```
 
 - **L_ce**: Cross-entropy loss
