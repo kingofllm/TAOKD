@@ -103,7 +103,7 @@ Modify the `param_grid` dictionary in `run.py` to define your search space.
 |-----------|-------------|---------|
 | `--n_heads` | Number of attention heads | `2` |
 | `--n_groups` | Number of attention groups | `2` |
-| `--stride` | Sampling stride | `1` |
+| `--stride` | Sampling stride | `4` |
 
 ## Loss Function
 
